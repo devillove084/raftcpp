@@ -11,7 +11,6 @@
 #include "proto/raft.pb.h"
 #include "src/common/config.h"
 #include "src/common/endpoint.h"
-#include "src/common/id.h"
 #include "src/common/logging.h"
 #include "src/common/timer.h"
 #include "src/common/timer_manager.h"
@@ -41,35 +40,23 @@ public:
 
     bool IsLeader() const;
 
-    void PushRequest(const std::shared_ptr<PushLogsRequest> &request);
+    void PushEntry(LogEntry &entry);
 
     void RequestPreVote();
 
     grpc::Status HandleRequestPreVote(::grpc::ServerContext *context,
                                       const ::raftcpp::PreVoteRequest *request,
                                       ::raftcpp::PreVoteResponse *response);
-
-    void OnPreVote(const asio::error_code &ec, std::string_view data);
-
+                                      
     void RequestVote();
 
     grpc::Status HandleRequestVote(::grpc::ServerContext *context,
                                    const ::raftcpp::VoteRequest *request,
                                    ::raftcpp::VoteResponse *response);
 
-    void OnVote(const asio::error_code &ec, std::string_view data);
-
-    grpc::Status HandleRequestHeartbeat(::grpc::ServerContext *context,
-                                        const ::raftcpp::HeartbeatRequest *request,
-                                        ::raftcpp::HeartbeatResponse *response);
-
-    grpc::Status HandleRequestPushLogs(::grpc::ServerContext *context,
-                                       const ::raftcpp::PushLogsRequest *request,
-                                       ::google::protobuf::Empty *response);
-
-    void RequestHeartbeat();
-
-    void OnHeartbeat(const asio::error_code &ec, std::string_view data);
+    grpc::Status HandleRequestAppendEntries(::grpc::ServerContext *context,
+                                       const ::raftcpp::AppendEntriesRequest *request,
+                                       ::raftcpp::AppendEntriesResponse *response);
 
     RaftState GetCurrState() {
         std::lock_guard<std::recursive_mutex> guard{mutex_};
@@ -90,32 +77,49 @@ private:
 
     // void InitRpcHandlers();
 
-    void StepBack(int32_t term_id);
+    void StepBack(int64_t term_id);
 
     void InitTimers();
+
+    void BecomeFollower(int64_t term, int64_t leader_id = -1);
+
+    void BecomePreCandidate();
+
+    void BecomeCandidate();
+
+    void BecomeLeader();
+
+    uint64_t GetRandomizedElectionTimeout();
+
+    // Reset the election timer
+    void RescheduleElection();
+
+    // Asynchronous replication to a raft node
+    void ReplicateOneRound(int64_t node_id);
+
+    // With the heartbeat, the follower's log will be replicated to the same location as the leader
+    void BroadcastHeartbeat();
 
 private:
     // Current state of this node. This initial value of this should be a FOLLOWER.
     RaftState curr_state_ = RaftState::FOLLOWER;
 
-    // Current term id in this node local view.
-    TermID curr_term_id_;
+    // The ID of this node.
+    int64_t this_node_id_;
 
-    // The rpc server on this node to be connected from all other node in this raft group.
-    // std::unique_ptr<grpc::Server> rpc_server_;
+    // The ID of this current term leader node, -1 means no leader has been elected.
+    int64_t leader_node_id_ = -1;
+
+    // Current term id in this node local view.
+    int64_t curr_term_;
+
+    // CandidateId voted for in the current term, or -1 if not voted for any candidate
+    int64_t vote_for_;
 
     // The rpc clients to all other nodes.
-    std::unordered_map<NodeID, std::shared_ptr<raftrpc::Stub>> all_rpc_clients_;
+    std::unordered_map<int64_t, std::shared_ptr<raftrpc::Stub>> all_rpc_clients_;
 
     common::Config config_;
-
-    // This set is used to cache the endpoints of the nodes which is responded for the pre
-    // vote request.
-    std::unordered_set<std::string> responded_pre_vote_nodes_;
-
-    // This set is used to cache the endpoints of the nodes which is reponded for the vote
-    // request.
-    std::unordered_set<std::string> responded_vote_nodes_;
 
     // The recursive mutex that protects all of the node state.
     mutable std::recursive_mutex mutex_;
@@ -124,12 +128,7 @@ private:
     // otherwise the all followers will be timed out at one time.
     Randomer randomer_;
 
-    // The ID of this node.
-    NodeID this_node_id_;
-
     std::shared_ptr<StateMachine> state_machine_;
-
-    std::unique_ptr<NodeID> leader_node_id_ = nullptr;
 
     std::shared_ptr<common::TimerManager> timer_manager_;
 
